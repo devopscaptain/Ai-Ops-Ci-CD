@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vulnerable-app
+  namespace: default
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: vulnerable-app
+  template:
+    metadata:
+      labels:
+        app: vulnerable-app
+    spec:
+      containers:
+      - name: app
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+        
+        # CRITICAL: Running as root
+        securityContext:
+          runAsUser: 0
+          privileged: true  # CRITICAL: Privileged container
+          allowPrivilegeEscalation: true
+        
+        # HIGH: Hardcoded secrets
+        env:
+        - name: DATABASE_PASSWORD
+          value: "admin123"
+        - name: API_SECRET
+          value: "sk-abcd1234567890"
+        - name: JWT_SECRET
+          value: "my-super-secret-key"
+        
+        # MEDIUM: No resource limits
+        resources: {}
+        
+        # MEDIUM: No readiness/liveness probes
+        
+      # MEDIUM: No security context at pod level
+      # MEDIUM: No network policies
+      
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vulnerable-app-service
+spec:
+  type: LoadBalancer  # MEDIUM: Exposing directly to internet
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+  selector:
+    app: vulnerable-app
