@@ -1,0 +1,105 @@
+name: Infrastructure Security Scan
+
+on:
+  pull_request:
+    paths:
+      - '**/*.tf'
+      - '**/*.tfvars'
+      - '**/*.yaml'
+      - '**/*.yml'
+      - 'charts/**/*'
+  push:
+    branches: [main, master]
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      security-events: write
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        pip install boto3 pyyaml
+
+    - name: Configure AWS
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Run Security Analysis
+      id: analysis
+      run: |
+        python security_analyzer.py
+        echo "results_file=security-results.json" >> $GITHUB_OUTPUT
+
+    - name: Upload SARIF results
+      if: always()
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: security-results.sarif
+
+    - name: Comment PR
+      if: github.event_name == 'pull_request' && always()
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          if (fs.existsSync('security-results.json')) {
+            const results = JSON.parse(fs.readFileSync('security-results.json', 'utf8'));
+            
+            let comment = `## 🔒 Infrastructure Security Analysis\n\n`;
+            comment += `**Scan Summary:** ${results.summary}\n\n`;
+            
+            if (results.issues.length > 0) {
+              comment += `### Issues Found (${results.issues.length})\n\n`;
+              results.issues.slice(0, 10).forEach(issue => {
+                const emoji = issue.severity === 'high' ? '🚨' : issue.severity === 'medium' ? '⚠️' : 'ℹ️';
+                comment += `${emoji} **${issue.severity.toUpperCase()}** \`${issue.file}\` line ${issue.line || 'N/A'}\n`;
+                comment += `   ${issue.description}\n`;
+                if (issue.recommendation) comment += `   💡 ${issue.recommendation}\n`;
+                comment += `\n`;
+              });
+              
+              if (results.issues.length > 10) {
+                comment += `... and ${results.issues.length - 10} more issues\n\n`;
+              }
+            }
+            
+            comment += `\n📊 **Cost Impact:** $${results.estimated_monthly_cost || '0.00'}/month for analysis`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+          }
+
+    - name: Fail on Critical Issues
+      if: always()
+      run: |
+        if [ -f "security-results.json" ]; then
+          HIGH_COUNT=$(jq '[.issues[] | select(.severity == "high")] | length' security-results.json)
+          if [ "$HIGH_COUNT" -gt 0 ]; then
+            echo "❌ Found $HIGH_COUNT high-severity security issues"
+            exit 1
+          fi
+        fi
